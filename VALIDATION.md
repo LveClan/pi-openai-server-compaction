@@ -2,7 +2,7 @@
 
 ## Pi compatibility and nullable headers
 
-Strict typecheck and the deterministic smoke suite pass with disposable exact peer installs for Pi `0.80.9` (the development baseline), `0.82.1`, `0.83.0`, `0.84.0`, and exact `0.84.1`. The smoke suite passes a `null` authorization-deletion marker through the actual pi-ai summary stream boundary unchanged, and separately captures the extension's direct `fetch` boundary to prove deletion markers are absent, all emitted request-header values are strings, and the generated bearer placeholder is not restored. A no-null Codex header fixture remains covered.
+Strict typecheck and the deterministic smoke suite pass with disposable exact peer installs for Pi `0.80.9` (the development baseline), `0.82.1`, `0.83.0`, `0.84.0`, and exact `0.84.1`. The smoke suite passes a `null` authorization-deletion marker through the actual pi-ai summary stream boundary unchanged, and separately captures the extension's direct `fetch` boundary to prove deletion markers are absent, all emitted request-header values are strings, and the generated bearer placeholder is not restored. Both the `openai/*` and `openai-codex/*` `fetch` boundaries are covered: null markers delete the generated Codex identity headers case-insensitively, generated identity values still take precedence over provider string values, and a no-null Codex header fixture remains covered.
 
 One isolated exact-Pi-`0.84.1` `openai-codex/gpt-5.6-sol` canary completed real remote compaction and post-restart recall. It used only the Codex auth entry in a disposable mode-`0600` home, which was deleted immediately afterward.
 
