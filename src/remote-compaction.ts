@@ -218,6 +218,23 @@ function mergeConcreteRequestHeaders(
   return merged;
 }
 
+function deletedHeaderNames(headers: ProviderHeadersLike | undefined): Set<string> {
+  const deleted = new Set<string>();
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    if (value === null) deleted.add(name.toLowerCase());
+  }
+  return deleted;
+}
+
+function withoutDeletedHeaders(
+  headers: Record<string, string>,
+  deleted: Set<string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([name]) => !deleted.has(name.toLowerCase())),
+  );
+}
+
 function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<string, string> {
   const configuredFeatures = Object.entries(headers)
     .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
@@ -245,22 +262,26 @@ export function buildRemoteCompactionHeaders(params: {
     throw new Error("Remote compaction v2 headers are not supported for this model.");
   }
 
-  const generatedHeaders: ProviderHeadersLike = {
-    authorization: `Bearer ${params.apiKey}`,
-    ...buildCodexIdentityHeaders(params.sessionId),
-    ...(isCodex
-      ? {
+  const deletedByProvider = deletedHeaderNames(params.headers);
+  const codexRequestHeaders = isCodex
+    ? withoutDeletedHeaders(
+        {
           "chatgpt-account-id": extractCodexAccountId(params.apiKey),
           originator: "pi",
           "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
           "OpenAI-Beta": "responses=experimental",
-        }
-      : {}),
-  };
+        },
+        deletedByProvider,
+      )
+    : {};
 
   return withRemoteCompactionV2Feature(mergeConcreteRequestHeaders(
-    generatedHeaders,
+    {
+      authorization: `Bearer ${params.apiKey}`,
+      ...buildCodexIdentityHeaders(params.sessionId),
+    },
     params.headers,
+    codexRequestHeaders,
     {
       accept: "text/event-stream",
       "content-type": "application/json",

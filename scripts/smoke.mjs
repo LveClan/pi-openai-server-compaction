@@ -460,16 +460,22 @@ const codexHttpHeaderEntries = await captureDirectRequestHeaders({
   headers: {
     Authorization: null,
     "OpenAI-Beta": null,
+    "User-Agent": null,
+    "Chatgpt-Account-Id": null,
     Originator: "other",
   },
 });
 assert.ok(codexHttpHeaderEntries.every(([, value]) => typeof value === "string"));
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "authorization"), []);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "openai-beta"), []);
-assert.deepEqual(headerValues(codexHttpHeaderEntries, "originator"), ["other"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "user-agent"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "chatgpt-account-id"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "originator"), ["pi"]);
 assert.equal(codexHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
-assert.deepEqual(headerValues(codexHttpHeaderEntries, "chatgpt-account-id"), ["account-123"]);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "session_id"), ["session-123"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "accept"), ["text/event-stream"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "content-type"), ["application/json"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "x-codex-beta-features"), ["remote_compaction_v2"]);
 
 const codexDefaultHeaderEntries = await captureDirectRequestHeaders({
   model: {
@@ -488,6 +494,27 @@ assert.deepEqual(
 assert.deepEqual(headerValues(codexDefaultHeaderEntries, "originator"), ["pi"]);
 assert.deepEqual(headerValues(codexDefaultHeaderEntries, "openai-beta"), ["responses=experimental"]);
 assert.deepEqual(headerValues(codexDefaultHeaderEntries, "x-extra"), ["yes"]);
+
+const codexOverrideHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: {
+    Authorization: "Bearer provider-token",
+    Originator: "codex_cli_rs",
+    "OpenAI-BETA": "responses=other",
+    "User-Agent": "other-agent",
+  },
+});
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "originator"), ["pi"]);
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "openai-beta"), ["responses=experimental"]);
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "authorization"), ["Bearer provider-token"]);
+assert.equal(headerValues(codexOverrideHeaderEntries, "user-agent").length, 1);
+assert.match(headerValues(codexOverrideHeaderEntries, "user-agent")[0], /^pi-openai-server-compaction \(/);
 
 const websocketHeaders = buildCodexWebSocketHeaders("session-123");
 assert.equal(websocketHeaders["x-client-request-id"], "session-123");
