@@ -205,8 +205,10 @@ So the package is intentionally hybrid:
 ### Runtime smoke
 
 - `npm run smoke`
+- `npm run test` (strict typecheck plus the smoke suite)
 
-Verifies imports/loadability.
+Verifies loadability, core compaction/replay algorithms, and the provider-header
+contracts described in `TESTPLAN.md`.
 
 ### Live end-to-end test
 

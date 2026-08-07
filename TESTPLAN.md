@@ -61,7 +61,7 @@
 
 ## Deterministic compatibility test
 
-`npm run test` covers nullable provider headers at both relevant boundaries: unchanged forwarding into a pi-ai stream and case-insensitive omission from the extension's concrete direct-HTTP headers. Run it with disposable exact peer installs for every version documented in the README support matrix.
+`npm run test` covers nullable provider headers at both relevant boundaries: unchanged forwarding into a pi-ai stream and case-insensitive omission from the extension's concrete direct-HTTP headers. Run it with disposable exact peer installs for every Pi version listed under Requirements in `README.md`.
 
 ## Automated live test
 
