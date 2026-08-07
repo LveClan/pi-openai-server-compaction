@@ -240,31 +240,32 @@ export function buildRemoteCompactionHeaders(params: {
   headers?: ProviderHeadersLike;
   sessionId?: string;
 }): Record<string, string> {
-  const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
-  const commonHeaders = withRemoteCompactionV2Feature(mergeConcreteRequestHeaders(
-    {
-      authorization: `Bearer ${params.apiKey}`,
-      ...codexIdentityHeaders,
-    },
+  const isCodex = isOpenAICodexResponsesModel(params.model);
+  if (!isDirectOpenAIResponsesModel(params.model) && !isCodex) {
+    throw new Error("Remote compaction v2 headers are not supported for this model.");
+  }
+
+  const generatedHeaders: ProviderHeadersLike = {
+    authorization: `Bearer ${params.apiKey}`,
+    ...buildCodexIdentityHeaders(params.sessionId),
+    ...(isCodex
+      ? {
+          "chatgpt-account-id": extractCodexAccountId(params.apiKey),
+          originator: "pi",
+          "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
+          "OpenAI-Beta": "responses=experimental",
+        }
+      : {}),
+  };
+
+  return withRemoteCompactionV2Feature(mergeConcreteRequestHeaders(
+    generatedHeaders,
     params.headers,
     {
       accept: "text/event-stream",
       "content-type": "application/json",
     },
   ));
-  if (isDirectOpenAIResponsesModel(params.model)) {
-    return commonHeaders;
-  }
-  if (isOpenAICodexResponsesModel(params.model)) {
-    return {
-      ...commonHeaders,
-      "chatgpt-account-id": extractCodexAccountId(params.apiKey),
-      originator: "pi",
-      "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
-      "OpenAI-Beta": "responses=experimental",
-    };
-  }
-  throw new Error("Remote compaction v2 headers are not supported for this model.");
 }
 
 function isAssistantPhase(value: unknown): value is AssistantPhase {

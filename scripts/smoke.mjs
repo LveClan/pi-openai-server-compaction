@@ -169,12 +169,13 @@ try {
     tokensBefore: 1,
   });
   assert.equal(portableSummary.summary, "stream summary");
-  assert.strictEqual(
+  assert.deepStrictEqual(
     forwardedStreamHeaders,
     streamHeaders,
-    "pi-ai stream boundary should receive the original ProviderHeaders object",
+    "pi-ai stream boundary should receive the ProviderHeaders unchanged",
   );
   assert.equal(forwardedStreamHeaders.authorization, null);
+  assert.equal(forwardedStreamHeaders["x-forwarded-header"], "preserved");
 } finally {
   unregisterApiProviders(streamProviderSource);
 }
@@ -397,46 +398,96 @@ assert.equal(codexHeaders.authorization, `Bearer header.${accountPayload}.signat
 assert.equal(codexHeaders["chatgpt-account-id"], "account-123");
 assert.equal(codexHeaders["x-extra"], "yes");
 
-let directHttpHeaders;
-const originalFetch = globalThis.fetch;
-globalThis.fetch = async (_url, init) => {
-  directHttpHeaders = init?.headers;
-  return new Response([
-    'data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"NULL_HEADER_TEST"}}',
-    'data: {"type":"response.completed","response":{}}',
-    "",
-  ].join("\n\n"), {
-    status: 200,
-    headers: { "content-type": "text/event-stream" },
-  });
-};
-try {
-  await callRemoteCompactionEndpoint({
-    model: {
-      provider: "openai",
-      api: "openai-responses",
-      id: "gpt-5.4-nano",
-    },
-    apiKey: "placeholder-credential-must-stay-deleted",
-    headers: {
-      Authorization: null,
-      "x-delete-marker": null,
-      "x-concrete-header": "preserved",
-    },
-    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }],
-    tools: [],
-    parallelToolCalls: true,
-  });
-} finally {
-  globalThis.fetch = originalFetch;
+async function captureDirectRequestHeaders(params) {
+  let captured;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    captured = init?.headers;
+    return new Response([
+      'data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"NULL_HEADER_TEST"}}',
+      'data: {"type":"response.completed","response":{}}',
+      "",
+    ].join("\n\n"), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  try {
+    await callRemoteCompactionEndpoint({
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }],
+      tools: [],
+      parallelToolCalls: true,
+      ...params,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(captured && typeof captured === "object");
+  return Object.entries(captured);
 }
-assert.ok(directHttpHeaders && typeof directHttpHeaders === "object");
-const directHttpHeaderEntries = Object.entries(directHttpHeaders);
+
+function headerValues(entries, name) {
+  return entries.filter(([key]) => key.toLowerCase() === name.toLowerCase()).map(([, value]) => value);
+}
+
+const directHttpHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.4-nano",
+  },
+  apiKey: "placeholder-credential-must-stay-deleted",
+  headers: {
+    Authorization: null,
+    "x-delete-marker": null,
+    "x-concrete-header": "preserved",
+  },
+});
 assert.ok(directHttpHeaderEntries.every(([, value]) => typeof value === "string"));
-assert.equal(directHttpHeaderEntries.some(([name]) => name.toLowerCase() === "authorization"), false);
-assert.equal(directHttpHeaderEntries.some(([name]) => name.toLowerCase() === "x-delete-marker"), false);
+assert.deepEqual(headerValues(directHttpHeaderEntries, "authorization"), []);
+assert.deepEqual(headerValues(directHttpHeaderEntries, "x-delete-marker"), []);
 assert.equal(directHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
-assert.equal(directHttpHeaders["x-concrete-header"], "preserved");
+assert.deepEqual(headerValues(directHttpHeaderEntries, "x-concrete-header"), ["preserved"]);
+
+const codexHttpHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: {
+    Authorization: null,
+    "OpenAI-Beta": null,
+    Originator: "other",
+  },
+});
+assert.ok(codexHttpHeaderEntries.every(([, value]) => typeof value === "string"));
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "authorization"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "openai-beta"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "originator"), ["other"]);
+assert.equal(codexHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "chatgpt-account-id"), ["account-123"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "session_id"), ["session-123"]);
+
+const codexDefaultHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: { "x-extra": "yes" },
+});
+assert.deepEqual(
+  headerValues(codexDefaultHeaderEntries, "authorization"),
+  [`Bearer header.${accountPayload}.signature`],
+);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "originator"), ["pi"]);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "openai-beta"), ["responses=experimental"]);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "x-extra"), ["yes"]);
 
 const websocketHeaders = buildCodexWebSocketHeaders("session-123");
 assert.equal(websocketHeaders["x-client-request-id"], "session-123");
