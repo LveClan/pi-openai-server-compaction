@@ -75,7 +75,8 @@ pi -e ./src/index.ts --model openai/gpt-5.6-luna
 ## Requirements
 
 - Node `>= 22`
-- Pi `>=0.80.9 <0.81.0`
+- Pi `>=0.80.9 <=0.84.1`
+  - strict typecheck and deterministic smoke coverage: `0.80.9`, `0.82.1`, `0.83.0`, `0.84.0`, and exact `0.84.1`
 - Auth/config for the model you want to use must already work in Pi
 - A supported OpenAI Responses model, e.g. `openai/gpt-5.6-sol` or `openai-codex/gpt-5.6-sol`
 
@@ -93,6 +94,8 @@ For direct `openai/*` models between compactions, the extension also:
 - Provides a WebSocket-backed transport path with HTTP fallback
 
 For `openai-codex/*` models, the extension preserves the built-in Codex transport and only injects reconstructed remote compaction history after compaction boundaries.
+
+Pi 0.84+ provider headers may contain `null` deletion markers. The extension forwards those markers unchanged to Pi/pi-ai streams. For its own remote-compaction HTTP request, it applies them case-insensitively as deletions, so they are omitted rather than serialized as `"null"` or replaced with an empty/default credential.
 
 ## How compaction works
 

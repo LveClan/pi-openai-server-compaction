@@ -32,6 +32,9 @@ import {
 
 type CompactionPreparation = SessionBeforeCompactEvent["preparation"];
 type AssistantPhase = "commentary" | "final_answer";
+type ProviderHeadersLike = Record<string, string | null>;
+type PiAiStreamHeaders = NonNullable<Parameters<typeof complete>[2]>["headers"];
+type PiCompactionHeaders = Parameters<typeof compact>[3];
 type ToolResultOutputItem =
   | { type: "input_text"; text: string }
   | { type: "input_image"; image_url: string };
@@ -198,6 +201,23 @@ function extractCodexAccountId(token: string): string {
   return accountId;
 }
 
+function mergeConcreteRequestHeaders(
+  ...sources: Array<ProviderHeadersLike | undefined>
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const source of sources) {
+    for (const [name, value] of Object.entries(source ?? {})) {
+      for (const existingName of Object.keys(merged)) {
+        if (existingName.toLowerCase() === name.toLowerCase()) {
+          delete merged[existingName];
+        }
+      }
+      if (value !== null) merged[name] = value;
+    }
+  }
+  return merged;
+}
+
 function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<string, string> {
   const configuredFeatures = Object.entries(headers)
     .find(([name]) => name.toLowerCase() === "x-codex-beta-features")?.[1]
@@ -217,17 +237,21 @@ function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<
 export function buildRemoteCompactionHeaders(params: {
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeadersLike;
   sessionId?: string;
 }): Record<string, string> {
   const codexIdentityHeaders = buildCodexIdentityHeaders(params.sessionId);
-  const commonHeaders = withRemoteCompactionV2Feature({
-    authorization: `Bearer ${params.apiKey}`,
-    ...codexIdentityHeaders,
-    ...(params.headers ?? {}),
-    accept: "text/event-stream",
-    "content-type": "application/json",
-  });
+  const commonHeaders = withRemoteCompactionV2Feature(mergeConcreteRequestHeaders(
+    {
+      authorization: `Bearer ${params.apiKey}`,
+      ...codexIdentityHeaders,
+    },
+    params.headers,
+    {
+      accept: "text/event-stream",
+      "content-type": "application/json",
+    },
+  ));
   if (isDirectOpenAIResponsesModel(params.model)) {
     return commonHeaders;
   }
@@ -681,7 +705,7 @@ export async function generatePortableSummary(params: {
   messages: AgentMessage[];
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeadersLike;
   customInstructions?: string;
   signal?: AbortSignal;
   firstKeptEntryId: string;
@@ -701,7 +725,9 @@ export async function generatePortableSummary(params: {
     },
     {
       apiKey: params.apiKey,
-      headers: params.headers,
+      // Runtime identity is intentional: Pi 0.84+ accepts deletion markers,
+      // while older declarations only described string-valued headers.
+      headers: params.headers as PiAiStreamHeaders,
       maxTokens: 4096,
       signal: params.signal,
     },
@@ -725,7 +751,7 @@ export async function generateBestEffortLocalSummary(params: {
   messages: AgentMessage[];
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeadersLike;
   customInstructions?: string;
   signal?: AbortSignal;
   thinkingLevel?: ThinkingLevel;
@@ -739,7 +765,7 @@ export async function generateBestEffortLocalSummary(params: {
       params.preparation,
       params.model,
       params.apiKey,
-      params.headers,
+      params.headers as PiCompactionHeaders,
       params.customInstructions,
       params.signal,
       params.thinkingLevel,
@@ -919,7 +945,7 @@ export function parseRemoteCompactionV2Events(events: unknown[]): RemoteCompacti
 export async function callRemoteCompactionEndpoint(params: {
   model: Model<any>;
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: ProviderHeadersLike;
   sessionId?: string;
   input: ResponseItem[];
   instructions?: string;

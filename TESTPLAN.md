@@ -59,6 +59,10 @@
 - Confirm footer/session stats show non-zero token/cost totals.
 - Compare rough totals against dashboard/provider logs when possible.
 
+## Deterministic compatibility test
+
+`npm run test` covers nullable provider headers at both relevant boundaries: unchanged forwarding into a pi-ai stream and case-insensitive omission from the extension's concrete direct-HTTP headers. Run it with disposable exact peer installs for every version documented in the README support matrix.
+
 ## Automated live test
 
 ```bash
