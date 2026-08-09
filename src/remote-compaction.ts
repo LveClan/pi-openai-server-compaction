@@ -262,6 +262,8 @@ export function buildRemoteCompactionHeaders(params: {
   const codexRequestHeaders = isCodex
     ? withoutDeletedHeaders(
         {
+          // Resolved lazily: extraction throws on non-JWT credentials, so a provider
+          // that deletes this header must not force us to parse a key we never send.
           ...(deletedByProvider.has("chatgpt-account-id")
             ? {}
             : { "chatgpt-account-id": extractCodexAccountId(params.apiKey) }),

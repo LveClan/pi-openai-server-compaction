@@ -95,7 +95,7 @@ For direct `openai/*` models between compactions, the extension also:
 
 For `openai-codex/*` models, the extension preserves the built-in Codex transport and only injects reconstructed remote compaction history after compaction boundaries.
 
-Pi 0.84+ provider headers may contain `null` deletion markers. The extension forwards those markers unchanged to Pi/pi-ai streams. For its own remote-compaction HTTP request, it applies them case-insensitively as deletions, so they are omitted rather than serialized as `"null"` or replaced with an empty/default credential.
+Pi 0.84+ provider headers may contain `null` deletion markers. The extension forwards those markers unchanged to Pi/pi-ai streams. For its own remote-compaction HTTP request, it applies them case-insensitively as deletions, so they are omitted rather than serialized as `"null"` or replaced with an empty/default credential. The exceptions are the headers that request itself requires — `accept`, `content-type`, and `x-codex-beta-features` — which the extension always sets.
 
 ## How compaction works
 
