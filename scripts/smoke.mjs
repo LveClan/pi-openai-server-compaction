@@ -398,6 +398,23 @@ assert.equal(codexHeaders.authorization, `Bearer header.${accountPayload}.signat
 assert.equal(codexHeaders["chatgpt-account-id"], "account-123");
 assert.equal(codexHeaders["x-extra"], "yes");
 
+const codexOpaqueKeyHeaders = buildRemoteCompactionHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: "placeholder-credential-must-stay-deleted",
+  headers: {
+    Authorization: null,
+    "Chatgpt-Account-Id": null,
+  },
+  sessionId: "session-123",
+});
+assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "chatgpt-account-id"), []);
+assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "authorization"), []);
+assert.equal(codexOpaqueKeyHeaders.originator, "pi");
+
 async function captureDirectRequestHeaders(params) {
   let captured;
   const originalFetch = globalThis.fetch;

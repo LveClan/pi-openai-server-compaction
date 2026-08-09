@@ -241,14 +241,10 @@ function withRemoteCompactionV2Feature(headers: Record<string, string>): Record<
     ?.split(",")
     .map((feature) => feature.trim())
     .filter(Boolean) ?? [];
-  const headersWithoutFeature = Object.fromEntries(
-    Object.entries(headers).filter(([name]) => name.toLowerCase() !== "x-codex-beta-features"),
-  );
   const features = [...new Set([...configuredFeatures, REMOTE_COMPACTION_V2_FEATURE])];
-  return {
-    ...headersWithoutFeature,
+  return mergeConcreteRequestHeaders(headers, {
     "x-codex-beta-features": features.join(","),
-  };
+  });
 }
 
 export function buildRemoteCompactionHeaders(params: {
@@ -266,7 +262,9 @@ export function buildRemoteCompactionHeaders(params: {
   const codexRequestHeaders = isCodex
     ? withoutDeletedHeaders(
         {
-          "chatgpt-account-id": extractCodexAccountId(params.apiKey),
+          ...(deletedByProvider.has("chatgpt-account-id")
+            ? {}
+            : { "chatgpt-account-id": extractCodexAccountId(params.apiKey) }),
           originator: "pi",
           "user-agent": `pi-openai-server-compaction (${platform()} ${release()}; ${arch()})`,
           "OpenAI-Beta": "responses=experimental",
