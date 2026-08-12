@@ -108,8 +108,57 @@ const {
   remoteCompactionV2EndpointUrl,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
+  isOpenAIModelId,
+  supportsRemoteCompactionModel,
+  usesExplicitRemoteCompactionHistory,
+} = await import(pathToFileURL(join(repoRoot, "src", "openai.ts")).href);
+const {
   selectInputItemsForContinuation,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai-ws-stream.ts")).href);
+
+const customProviderModel = {
+  provider: "company-gateway",
+  api: "openai-responses",
+  id: "openai/gpt-5.6-sol",
+  name: "Company default model",
+  baseUrl: "https://models.example.com/v1",
+};
+assert.equal(isOpenAIModelId(customProviderModel.id), true);
+assert.equal(supportsRemoteCompactionModel(customProviderModel), true);
+assert.equal(usesExplicitRemoteCompactionHistory(customProviderModel), true);
+assert.equal(
+  supportsRemoteCompactionModel({
+    ...customProviderModel,
+    id: "claude-sonnet-4-6",
+  }),
+  false,
+);
+assert.equal(
+  supportsRemoteCompactionModel({
+    ...customProviderModel,
+    id: "internal-alias",
+    name: "GPT-5.6 Sol",
+  }),
+  false,
+  "matching the stable model id avoids display-name false positives",
+);
+assert.equal(
+  supportsRemoteCompactionModel({
+    ...customProviderModel,
+    api: "anthropic-messages",
+  }),
+  false,
+  "model ids alone must not opt non-Responses APIs into OpenAI compaction",
+);
+assert.equal(
+  supportsRemoteCompactionModel({
+    provider: "company-gateway",
+    api: "openai-responses",
+    id: "gpt-5.6-sol",
+  }),
+  false,
+  "custom providers require an explicit base URL instead of falling back to api.openai.com",
+);
 
 const targetModelKey = "openai:openai-responses:gpt-5.4-nano";
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
@@ -234,6 +283,10 @@ assert.equal(
   }),
   "https://chatgpt.com/backend-api/codex/responses",
 );
+assert.equal(
+  remoteCompactionV2EndpointUrl(customProviderModel),
+  "https://models.example.com/v1/responses",
+);
 
 const parsedV2Events = parseRemoteCompactionV2Events([
   {
@@ -311,6 +364,15 @@ assert.match(compactionHeaders["x-codex-installation-id"], /^[0-9a-f-]{36}$/);
 assert.equal(compactionHeaders["x-extra"], "yes");
 assert.equal(compactionHeaders["x-codex-beta-features"], "remote_compaction_v2");
 assert.equal(compactionHeaders.accept, "text/event-stream");
+
+const customProviderHeaders = buildRemoteCompactionHeaders({
+  model: customProviderModel,
+  apiKey: "sk-proxy-test",
+  sessionId: "session-proxy",
+});
+assert.equal(customProviderHeaders.authorization, "Bearer sk-proxy-test");
+assert.equal(customProviderHeaders["x-codex-beta-features"], "remote_compaction_v2");
+assert.equal(customProviderHeaders["chatgpt-account-id"], undefined);
 
 const websocketHeaders = buildCodexWebSocketHeaders("session-123");
 assert.equal(websocketHeaders["x-client-request-id"], "session-123");

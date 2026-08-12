@@ -24,7 +24,7 @@ import { complete } from "@earendil-works/pi-ai/compat";
 import { isRecord } from "./config.ts";
 import {
   hostnameFromBaseUrl,
-  isDirectOpenAIResponsesModel,
+  isOpenAIResponsesCompactionModel,
   isOpenAICodexResponsesModel,
   supportsRemoteCompactionModel,
   modelKey,
@@ -111,7 +111,7 @@ function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string
   return trimmed.replace(/\/+$/, "");
 }
 
-function resolveDirectOpenAIResponsesEndpoint(model: Model<any>): string {
+function resolveOpenAIResponsesEndpoint(model: Model<any>): string {
   const baseUrl = normalizeBaseUrl(typeof model.baseUrl === "string" ? model.baseUrl : undefined, "https://api.openai.com/v1");
   if (baseUrl.endsWith("/responses")) return baseUrl;
   return baseUrl.endsWith("/v1") ? `${baseUrl}/responses` : `${baseUrl}/v1/responses`;
@@ -125,8 +125,8 @@ function resolveCodexResponsesEndpoint(model: Model<any>): string {
 }
 
 export function remoteCompactionV2EndpointUrl(model: Model<any>): string {
-  if (isDirectOpenAIResponsesModel(model)) {
-    return resolveDirectOpenAIResponsesEndpoint(model);
+  if (isOpenAIResponsesCompactionModel(model)) {
+    return resolveOpenAIResponsesEndpoint(model);
   }
   if (isOpenAICodexResponsesModel(model)) {
     return resolveCodexResponsesEndpoint(model);
@@ -228,7 +228,7 @@ export function buildRemoteCompactionHeaders(params: {
     accept: "text/event-stream",
     "content-type": "application/json",
   });
-  if (isDirectOpenAIResponsesModel(params.model)) {
+  if (isOpenAIResponsesCompactionModel(params.model)) {
     return commonHeaders;
   }
   if (isOpenAICodexResponsesModel(params.model)) {

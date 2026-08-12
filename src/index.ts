@@ -14,13 +14,13 @@ import {
   extractAssistantResponseId,
   extractResponsesReasoningConfig,
   extractResponsesTextConfig,
-  isOpenAICodexResponsesModel,
   looksLikeResponsesPayload,
   messageMatchesModel,
   modelKey,
   supportsPreviousResponseId,
   supportsRemoteCompactionModel,
   thinkingLevelToResponsesReasoning,
+  usesExplicitRemoteCompactionHistory,
 } from "./openai.ts";
 import { releaseAllWsSessions, releaseWsSession } from "./openai-ws-stream.ts";
 import {
@@ -330,7 +330,7 @@ export default function openaiServerCompactionExtension(pi: ExtensionAPI) {
     });
     const remoteState = getMatchingRemoteState(sessionId, model);
 
-    if (isOpenAICodexResponsesModel(model)) {
+    if (usesExplicitRemoteCompactionHistory(model)) {
       if (!remoteState) return undefined;
       const payload = applyRemoteHistoryPayloadPatch({
         payload: event.payload,
