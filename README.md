@@ -48,6 +48,7 @@ https://x.com/alexisgallagher/status/2042396986327060736?s=20 .)
 |-----------------------|-----------------------------|-----------------------------------|----------------------------------|-------------|
 | `openai/*`            | Yes                         | Yes                               | Yes                              | Yes         |
 | `openai-codex/*`      | Yes                         | No (built-in transport retained)  | No (built-in transport retained) | Yes         |
+| Custom Responses provider with an OpenAI model id | Yes | No | No | Yes (`isara/gpt-5.6-sol`) |
 | Azure                 | Partial (opt-in via config) | Partial                           | No                               | No          |
 
 ## Install
@@ -78,7 +79,7 @@ pi -e ./src/index.ts --model openai/gpt-5.6-luna
 - Pi `>=0.80.9 <=0.84.1`
   - strict typecheck and deterministic smoke coverage: `0.80.9`, `0.82.1`, `0.83.0`, `0.84.0`, and exact `0.84.1`
 - Auth/config for the model you want to use must already work in Pi
-- A supported OpenAI Responses model, e.g. `openai/gpt-5.6-sol` or `openai-codex/gpt-5.6-sol`
+- A supported OpenAI Responses model, e.g. `openai/gpt-5.6-sol`, `openai-codex/gpt-5.6-sol`, or an OpenAI model exposed by a custom `openai-responses` provider
 
 ## What it does
 
@@ -96,6 +97,8 @@ For direct `openai/*` models between compactions, the extension also:
 For `openai-codex/*` models, the extension preserves the built-in Codex transport and only injects reconstructed remote compaction history after compaction boundaries.
 
 Pi 0.84+ provider headers may contain `null` deletion markers. The extension forwards those markers unchanged to Pi/pi-ai streams. For its own remote-compaction HTTP request, it applies them case-insensitively as deletions, so they are omitted rather than serialized as `"null"` or replaced with an empty/default credential. The exceptions are the headers that request itself requires — `accept`, `content-type`, and `x-codex-beta-features` — which the extension always sets.
+
+For custom or multi-model providers using the `openai-responses` API, remote compaction is enabled when the canonical model id identifies an OpenAI model (`gpt-*`, `o1-*`, `o3-*`, `o4-*`, `chatgpt-*`, or `codex-*`) and the effective model has an explicit `baseUrl`. Provider display names and model display names are intentionally ignored: the stable model id avoids opting an unrelated model into the protocol merely because a label contains “GPT.” Requiring the custom endpoint prevents a custom credential from accidentally falling back to `api.openai.com`. These providers retain their normal transport; the extension only calls their `<baseUrl>/responses` endpoint for compaction and injects replacement history after a successful compaction.
 
 ## How compaction works
 
@@ -186,6 +189,7 @@ PI_OPENAI_SERVER_COMPACTION_TEST_MODEL=openai-codex/gpt-5.6-sol npm run test:liv
 
 - Pi's local JSONL/tree model remains authoritative
 - Opaque remote compaction artifacts are only reused for compatible OpenAI Responses turns
+- Model-id matching identifies likely OpenAI models behind custom providers, but cannot guarantee that a gateway implements compaction V2; unsupported endpoints fall back to Pi's portable summary
 - Switching to a different provider/model falls back to Pi's text-summary portability path
 - Compaction usage/cost is captured in details but not yet folded into Pi's `get_session_stats()` (requires Pi core changes)
 
