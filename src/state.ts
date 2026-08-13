@@ -5,11 +5,8 @@
  * live in Pi session entries; this module only caches the currently active
  * continuation and reconstructed replay state for the running process.
  */
-import type {
-  RemoteCompactionSessionState,
-  ResponsesReasoningConfig,
-  ResponsesTextConfig,
-} from "./remote-compaction.ts";
+import type { ResponsesRequestSnapshot } from "./openai.ts";
+import type { RemoteCompactionSessionState, ResponseItem } from "./remote-compaction.ts";
 
 export type ContinuationState = {
   responseId: string;
@@ -18,10 +15,9 @@ export type ContinuationState = {
   contextLength?: number;
 };
 
-export type ResponsesRequestShapeState = {
+export type ResponsesRequestShapeState = ResponsesRequestSnapshot & {
   updatedAt: number;
-  reasoning?: ResponsesReasoningConfig;
-  text?: ResponsesTextConfig;
+  suffix: ResponseItem[];
 };
 
 const continuationBySessionId = new Map<string, ContinuationState>();

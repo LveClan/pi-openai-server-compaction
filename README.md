@@ -83,7 +83,7 @@ pi -e ./src/index.ts --model openai/gpt-5.6-luna
 
 ## What it does
 
-On compaction, the extension requests Responses compaction v2 through `/v1/responses` in parallel with generating a portable Pi text summary. This gives you both:
+On compaction, the extension first requests Responses compaction v2 through `/v1/responses`. By default it then asks the same model to turn the returned compacted replacement history into a portable Pi text summary; set `portableSummary` to `false` to use only the remote request plus a static readable marker. The default gives you both:
 
 - **An OpenAI-native opaque compaction artifact** for high-fidelity continuity on compatible future turns
 - **A portable Pi text summary** so non-OpenAI models, session exports, forking, and tree navigation keep working
@@ -104,12 +104,14 @@ For custom or multi-model providers using the `openai-responses` API, remote com
 
 On Pi compaction events for supported models, the extension:
 
-1. Generates a **portable Pi text summary** (full-branch summary with fallback to Pi's built-in compaction helper)
-2. Calls `POST /v1/responses` with the conversation history, a trailing `compaction_trigger`, system prompt, tools, reasoning config, and text config
+1. Calls `POST /v1/responses` by reusing the latest normal request's wire-level prompt prefix and settings, appending outputs since that request plus a trailing `compaction_trigger`
+2. Optionally generates a **portable Pi text summary** from the returned replacement history and encrypted compaction artifact, using the active reasoning effort and the same prompt cache key/request shape
 3. Retains recent user messages and stores them with the returned opaque `compaction` item in `CompactionEntry.details.remoteCompaction`
-4. Persists remote compaction usage metadata when the backend returns it
+4. Persists remote compaction and portable-summary request diagnostics, including usage metadata returned by the backend
 
-The compaction request mirrors the shape of surrounding normal requests (reasoning effort, text settings, tool definitions) rather than using endpoint defaults.
+The compaction request mirrors the exact wire shape of the latest normal Responses request when available (input prefix, reasoning effort, text settings, tools, and prompt cache key), then appends the post-request outputs and `compaction_trigger`. The artifact-summary request is much smaller than replaying the full pre-compaction conversation. Its first request is not guaranteed to hit the old prompt cache because the compacted history is a new prefix, but it can establish that prefix for the next normal turn. If artifact summarization fails, the extension falls back to a full active-context summary and then Pi's static marker.
+
+Set `portableSummary` to `false` to skip the separate readable-summary model call and use only a static Pi summary marker plus the provider-native artifact; this more closely matches Codex's single-request behavior but reduces cross-model/session-export readability.
 
 ## Safety
 
@@ -140,6 +142,7 @@ Config is read from:
   "thresholdRatio": 0.7,
   "compactThreshold": 0,
   "usePreviousResponseId": true,
+  "portableSummary": true,
   "notify": false
 }
 ```
@@ -153,6 +156,7 @@ Environment overrides:
 | `PI_OPENAI_SERVER_COMPACTION_THRESHOLD`            | Explicit compact threshold (tokens)                         |
 | `PI_OPENAI_SERVER_COMPACTION_RATIO`                | Compact threshold as ratio of context window (default: 0.7) |
 | `PI_OPENAI_SERVER_COMPACTION_PREVIOUS_RESPONSE_ID` | Enable/disable `previous_response_id`                       |
+| `PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY`     | Enable/disable the separate portable text-summary request   |
 | `PI_OPENAI_SERVER_COMPACTION_NOTIFY`               | Show UI notifications when features activate                |
 
 ## Troubleshooting

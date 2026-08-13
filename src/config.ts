@@ -17,6 +17,7 @@ export type ExtensionConfig = {
   thresholdRatio?: number;
   notify?: boolean;
   usePreviousResponseId?: boolean;
+  portableSummary?: boolean;
 };
 
 export function isRecord(value: unknown): value is JsonRecord {
@@ -83,6 +84,10 @@ export function loadConfig(cwd: string): Required<ExtensionConfig> {
     usePreviousResponseId:
       toBoolean(process.env.PI_OPENAI_SERVER_COMPACTION_PREVIOUS_RESPONSE_ID) ??
       toBoolean(merged.usePreviousResponseId) ??
+      true,
+    portableSummary:
+      toBoolean(process.env.PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY) ??
+      toBoolean(merged.portableSummary) ??
       true,
   };
 }

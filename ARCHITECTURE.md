@@ -47,13 +47,12 @@ In practice, that means keeping two representations of context alive at once:
 
 1. Pi decides to compact or receives an explicit compact command.
 2. `src/index.ts` handles `session_before_compact`.
-3. In parallel, it tries to:
-   - generate a **portable local summary**
-   - request Responses compaction v2
-4. `src/remote-compaction.ts` converts Pi messages to OpenAI Responses `input` items, appends a `compaction_trigger`, and streams the compaction response from the normal Responses endpoint.
-5. If remote compaction succeeds, the returned opaque replacement history is stored in:
+3. It requests Responses compaction v2 first.
+4. `src/remote-compaction.ts` prefers the latest normal request's exact wire-level prompt prefix, appends outputs produced since that request and a `compaction_trigger`, and streams the compaction response from the normal Responses endpoint. If no live snapshot exists after reload, it reconstructs input from Pi's compaction-aware active context.
+5. When `portableSummary` is enabled, it sends the compacted replacement history and opaque artifact through the same model to generate a real portable summary. This second request keeps the active reasoning effort, prompt cache key, instructions, tools, and text settings. It is much smaller than replaying the full original context and can establish the compacted prefix for the next normal turn.
+6. If remote compaction succeeds, the returned opaque replacement history plus compact request diagnostics are stored in:
    - `CompactionEntry.details.remoteCompaction`
-6. Pi still keeps a text summary so the session remains understandable and portable.
+7. Pi keeps either the generated portable text summary or a static readable marker so the session remains understandable outside native replay. If artifact summarization fails, a full active-context summary remains the compatibility fallback.
 
 ### Post-compaction continuation
 

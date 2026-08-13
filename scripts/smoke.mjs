@@ -91,8 +91,21 @@ for (const packageName of [
   ensureLocalPeerLink(packageName);
 }
 
+const {
+  buildSessionContext,
+  convertToLlm,
+} = await import("@earendil-works/pi-coding-agent");
 const { default: extensionFactory } = await import(pathToFileURL(join(repoRoot, "src", "index.ts")).href);
 assert.equal(typeof extensionFactory, "function", "extension entrypoint should export a function");
+const { loadConfig } = await import(pathToFileURL(join(repoRoot, "src", "config.ts")).href);
+const originalPortableSummaryEnv = process.env.PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY;
+process.env.PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY = "false";
+assert.equal(loadConfig(repoRoot).portableSummary, false);
+if (originalPortableSummaryEnv === undefined) {
+  delete process.env.PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY;
+} else {
+  process.env.PI_OPENAI_SERVER_COMPACTION_PORTABLE_SUMMARY = originalPortableSummaryEnv;
+}
 
 const {
   buildCodexWebSocketHeaders,
@@ -102,15 +115,19 @@ const {
   buildRemoteCompactionV2History,
   callRemoteCompactionEndpoint,
   extractRemoteCompactionDetails,
+  generateArtifactPortableSummary,
   generatePortableSummary,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
   processCompactedHistory,
   reconstructRemoteCompactionStateFromBranch,
   remoteCompactionV2EndpointUrl,
+  selectRemoteCompactionInput,
 } = await import(pathToFileURL(join(repoRoot, "src", "remote-compaction.ts")).href);
 const {
+  extractResponsesRequestSnapshot,
   isOpenAIModelId,
+  resolveCompactionReasoning,
   supportsRemoteCompactionModel,
   usesExplicitRemoteCompactionHistory,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai.ts")).href);
@@ -129,8 +146,16 @@ const streamHeaders = {
   authorization: null,
 };
 let forwardedStreamHeaders;
+let forwardedSummaryReasoningEffort;
+let forwardedSummaryPayload;
 const mockSummaryStream = (model, _context, options) => {
   forwardedStreamHeaders = options?.headers;
+  forwardedSummaryReasoningEffort = options?.reasoningEffort;
+  const originalPayload = {
+    model: model.id,
+    input: [{ role: "user", content: "placeholder" }],
+  };
+  forwardedSummaryPayload = options?.onPayload?.(originalPayload, model) ?? originalPayload;
   const stream = createAssistantMessageEventStream();
   stream.end({
     role: "assistant",
@@ -170,6 +195,7 @@ try {
     },
     apiKey: "stream-test-key",
     headers: streamHeaders,
+    thinkingLevel: "xhigh",
     firstKeptEntryId: "entry-1",
     tokensBefore: 1,
   });
@@ -181,6 +207,55 @@ try {
   );
   assert.equal(forwardedStreamHeaders.authorization, null);
   assert.equal(forwardedStreamHeaders["x-forwarded-header"], "preserved");
+  assert.equal(forwardedSummaryReasoningEffort, "xhigh");
+
+  const artifactSummary = await generateArtifactPortableSummary({
+    replacementHistory: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "retained user context" }],
+      },
+      { type: "compaction", encrypted_content: "ENCRYPTED_ARTIFACT" },
+    ],
+    model: {
+      provider: "null-header-smoke",
+      api: "null-header-smoke",
+      id: "null-header-smoke",
+    },
+    apiKey: "stream-test-key",
+    headers: streamHeaders,
+    sessionId: "artifact-session",
+    promptCacheKey: "stable-cache-key",
+    instructions: "stable instructions",
+    tools: [{ type: "function", name: "read", parameters: {} }],
+    parallelToolCalls: true,
+    toolChoice: "auto",
+    text: { verbosity: "medium" },
+    reasoning: { effort: "high", summary: "detailed" },
+    customInstructions: "Keep exact decisions.",
+    thinkingLevel: "high",
+    firstKeptEntryId: "entry-2",
+    tokensBefore: 2,
+  });
+  assert.equal(artifactSummary.summary, "stream summary");
+  assert.equal(artifactSummary.details?.source, "remote_compaction_artifact");
+  assert.equal(artifactSummary.details?.reasoningEffort, "high");
+  assert.equal(artifactSummary.details?.inputItems, 3);
+  assert.equal(forwardedSummaryReasoningEffort, "high");
+  assert.equal(forwardedSummaryPayload.prompt_cache_key, "stable-cache-key");
+  assert.equal(forwardedSummaryPayload.instructions, "stable instructions");
+  assert.equal(forwardedSummaryPayload.parallel_tool_calls, true);
+  assert.equal(forwardedSummaryPayload.tool_choice, "auto");
+  assert.deepEqual(forwardedSummaryPayload.text, { verbosity: "medium" });
+  assert.deepEqual(forwardedSummaryPayload.reasoning, {
+    effort: "high",
+    summary: "detailed",
+  });
+  assert.equal(forwardedSummaryPayload.tools[0].name, "read");
+  assert.equal(forwardedSummaryPayload.input[1].encrypted_content, "ENCRYPTED_ARTIFACT");
+  assert.match(forwardedSummaryPayload.input[2].content[0].text, /Keep exact decisions/);
+  assert.doesNotMatch(JSON.stringify(forwardedSummaryPayload.input), /placeholder/);
 } finally {
   unregisterApiProviders(streamProviderSource);
 }
@@ -341,11 +416,59 @@ const requestBody = buildRemoteCompactionRequestBody({
 assert.equal(requestBody.model, "gpt-5.4-nano");
 assert.equal(requestBody.stream, true);
 assert.equal(requestBody.store, false);
-assert.equal(requestBody.tool_choice, "auto");
+assert.equal(requestBody.tool_choice, undefined);
 assert.deepEqual(requestBody.include, ["reasoning.encrypted_content"]);
 assert.deepEqual(requestBody.input.at(-1), { type: "compaction_trigger" });
 assert.deepEqual(requestBody.reasoning, { effort: "high", summary: "auto" });
 assert.deepEqual(requestBody.text, { verbosity: "medium" });
+
+const currentReasoning = resolveCompactionReasoning({
+  model: {
+    reasoning: true,
+    thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
+  },
+  thinkingLevel: "xhigh",
+  observed: { summary: "detailed" },
+});
+assert.deepEqual(currentReasoning, { effort: "xhigh", summary: "detailed" });
+assert.deepEqual(
+  resolveCompactionReasoning({
+    model: { reasoning: true, thinkingLevelMap: { max: "max" } },
+    thinkingLevel: "max",
+    observed: { effort: "low", summary: "auto" },
+  }),
+  { effort: "max", summary: "auto" },
+);
+assert.equal(
+  resolveCompactionReasoning({
+    model: { reasoning: true, thinkingLevelMap: { off: null } },
+    thinkingLevel: "off",
+    observed: { effort: "high", summary: "auto" },
+  }),
+  undefined,
+);
+
+const requestSnapshot = extractResponsesRequestSnapshot({
+  input: [
+    { role: "system", content: "stable system" },
+    { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] },
+  ],
+  tools: [{ type: "function", name: "read", parameters: {} }],
+  parallel_tool_calls: true,
+  prompt_cache_key: "stable-session",
+  tool_choice: "auto",
+  reasoning: { effort: "xhigh", summary: "auto" },
+}, {
+  provider: "gptpro",
+  api: "openai-responses",
+  id: "gpt-5.6-sol",
+});
+assert.ok(requestSnapshot);
+assert.equal(requestSnapshot.modelKey, "gptpro:openai-responses:gpt-5.6-sol");
+assert.equal(requestSnapshot.input?.[0]?.role, "system");
+assert.equal(requestSnapshot.promptCacheKey, "stable-session");
+assert.equal(requestSnapshot.reasoning?.effort, "xhigh");
+assert.equal(requestSnapshot.toolChoice, "auto");
 assert.equal(
   remoteCompactionV2EndpointUrl({
     provider: "openai",
@@ -414,6 +537,64 @@ assert.deepEqual(normalizedPromptItems[2], {
 assert.equal(normalizedPromptItems[3].result, "");
 assert.doesNotMatch(JSON.stringify(normalizedPromptItems), /orphan|ghost_snapshot/);
 
+const cachedPrefix = [
+  { role: "system", content: "stable system prompt" },
+  { type: "message", role: "user", content: [{ type: "input_text", text: "cached user" }] },
+];
+const selectedCachedInput = selectRemoteCompactionInput({
+  snapshotInput: cachedPrefix,
+  snapshotSuffix: [
+    { type: "message", role: "assistant", content: [{ type: "output_text", text: "latest reply" }] },
+  ],
+  fallbackInput: [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "must not replay" }] },
+  ],
+  model: { input: ["text"] },
+});
+assert.equal(selectedCachedInput.source, "wire_snapshot");
+assert.deepEqual(selectedCachedInput.input.slice(0, cachedPrefix.length), cachedPrefix);
+assert.match(JSON.stringify(selectedCachedInput.input), /latest reply/);
+assert.doesNotMatch(JSON.stringify(selectedCachedInput.input), /must not replay/);
+const selectedReconstructedInput = selectRemoteCompactionInput({
+  fallbackInput: [
+    { type: "message", role: "user", content: [{ type: "input_text", text: "reconstructed" }] },
+  ],
+  model: { input: ["text"] },
+});
+assert.equal(selectedReconstructedInput.source, "reconstructed");
+assert.match(JSON.stringify(selectedReconstructedInput.input), /reconstructed/);
+
+const oldMessage = {
+  type: "message",
+  id: "old-message",
+  parentId: null,
+  timestamp: "2026-01-01T00:00:00.000Z",
+  message: { role: "user", content: [{ type: "text", text: "OLD_RAW_HISTORY" }], timestamp: 1 },
+};
+const keptMessage = {
+  type: "message",
+  id: "kept-message",
+  parentId: "old-message",
+  timestamp: "2026-01-01T00:00:01.000Z",
+  message: { role: "user", content: [{ type: "text", text: "KEPT_TAIL" }], timestamp: 2 },
+};
+const nativeCompaction = {
+  type: "compaction",
+  id: "native-compaction",
+  parentId: "kept-message",
+  timestamp: "2026-01-01T00:00:02.000Z",
+  summary: "NATIVE_SUMMARY",
+  firstKeptEntryId: "kept-message",
+  tokensBefore: 1000,
+};
+const effectiveAfterNativeCompaction = convertToLlm(
+  buildSessionContext([oldMessage, keptMessage, nativeCompaction]).messages,
+);
+const effectiveJson = JSON.stringify(effectiveAfterNativeCompaction);
+assert.match(effectiveJson, /NATIVE_SUMMARY/);
+assert.match(effectiveJson, /KEPT_TAIL/);
+assert.doesNotMatch(effectiveJson, /OLD_RAW_HISTORY/);
+
 const compactedHistory = processCompactedHistory([
   { type: "message", role: "developer", content: [{ type: "input_text", text: "drop developer" }] },
   { type: "message", role: "user", content: [] },
@@ -438,6 +619,7 @@ const compactionHeaders = buildRemoteCompactionHeaders({
 });
 assert.equal(compactionHeaders.authorization, "Bearer sk-test");
 assert.equal(compactionHeaders.session_id, "session-123");
+assert.equal(compactionHeaders["x-client-request-id"], "session-123");
 assert.equal(compactionHeaders["x-codex-window-id"], "session-123:0");
 assert.match(compactionHeaders["x-codex-installation-id"], /^[0-9a-f-]{36}$/);
 assert.equal(compactionHeaders["x-extra"], "yes");
@@ -478,11 +660,13 @@ assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "chatgpt-ac
 assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "authorization"), []);
 assert.equal(codexOpaqueKeyHeaders.originator, "pi");
 
-async function captureDirectRequestHeaders(params) {
-  let captured;
+async function captureDirectRequest(params) {
+  let capturedHeaders;
+  let capturedBody;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (_url, init) => {
-    captured = init?.headers;
+    capturedHeaders = init?.headers;
+    capturedBody = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
     return new Response([
       'data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"NULL_HEADER_TEST"}}',
       'data: {"type":"response.completed","response":{}}',
@@ -502,8 +686,13 @@ async function captureDirectRequestHeaders(params) {
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.ok(captured && typeof captured === "object");
-  return Object.entries(captured);
+  assert.ok(capturedHeaders && typeof capturedHeaders === "object");
+  assert.ok(capturedBody && typeof capturedBody === "object");
+  return { headers: Object.entries(capturedHeaders), body: capturedBody };
+}
+
+async function captureDirectRequestHeaders(params) {
+  return (await captureDirectRequest(params)).headers;
 }
 
 function headerValues(entries, name) {
@@ -553,6 +742,7 @@ assert.deepEqual(headerValues(codexHttpHeaderEntries, "chatgpt-account-id"), [])
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "originator"), ["pi"]);
 assert.equal(codexHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "session_id"), ["session-123"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "x-client-request-id"), ["session-123"]);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "accept"), ["text/event-stream"]);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "content-type"), ["application/json"]);
 assert.deepEqual(headerValues(codexHttpHeaderEntries, "x-codex-beta-features"), ["remote_compaction_v2"]);
@@ -611,6 +801,19 @@ assert.equal(customProviderHeaders["x-proxy-token"], "proxy-token");
 assert.equal(customProviderHeaders["x-codex-beta-features"], "remote_compaction_v2");
 assert.equal(customProviderHeaders["chatgpt-account-id"], undefined);
 
+const capturedCompactionRequest = await captureDirectRequest({
+  model: customProviderModel,
+  apiKey: "sk-proxy-test",
+  sessionId: "stable-session-id",
+  reasoning: currentReasoning,
+});
+assert.deepEqual(capturedCompactionRequest.body.reasoning, {
+  effort: "xhigh",
+  summary: "detailed",
+});
+assert.equal(capturedCompactionRequest.body.prompt_cache_key, "stable-session-id");
+assert.deepEqual(capturedCompactionRequest.body.input.at(-1), { type: "compaction_trigger" });
+
 const websocketHeaders = buildCodexWebSocketHeaders("session-123");
 assert.equal(websocketHeaders["x-client-request-id"], "session-123");
 assert.equal(websocketHeaders.session_id, "session-123");
@@ -632,11 +835,21 @@ const detailsRoundTrip = extractRemoteCompactionDetails({
       totalTokens: 100,
       cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
     },
+    {
+      reasoning: { effort: "xhigh", summary: "auto" },
+      inputItems: 17,
+      inputSource: "wire_snapshot",
+    },
   ),
 });
 assert.ok(detailsRoundTrip, "expected remote compaction details round trip");
 assert.equal(detailsRoundTrip.usage?.cacheWrite, 40);
 assert.equal(detailsRoundTrip.usage?.cost.total, 10);
+assert.deepEqual(detailsRoundTrip.request, {
+  reasoning: { effort: "xhigh", summary: "auto" },
+  inputItems: 17,
+  inputSource: "wire_snapshot",
+});
 
 const incrementalInput = selectInputItemsForContinuation({
   context: {

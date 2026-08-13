@@ -78,6 +78,10 @@ export type ResponsesReasoningConfig = {
   summary?: "auto" | "concise" | "detailed" | null;
 };
 
+export type RemoteCompactionReasoningConfig = Omit<ResponsesReasoningConfig, "effort"> & {
+  effort?: ResponsesReasoningConfig["effort"] | "max";
+};
+
 export type ResponsesTextConfig = Record<string, unknown>;
 
 export type RemoteCompactionUsageSnapshot = Usage;
@@ -94,6 +98,11 @@ export type RemoteCompactionDetails = {
   modelKey: string;
   replacementHistory: ResponseItem[];
   usage?: RemoteCompactionUsageSnapshot;
+  request?: {
+    reasoning?: RemoteCompactionReasoningConfig;
+    inputItems: number;
+    inputSource?: "wire_snapshot" | "reconstructed";
+  };
 };
 
 export type RemoteCompactionSessionState = {
@@ -106,6 +115,13 @@ export type RemoteCompactionSessionState = {
 export type RemoteCompactionResult = {
   output: ResponseItem[];
   usage?: RemoteCompactionUsageSnapshot;
+};
+
+export type PortableSummaryDetails = {
+  source: "remote_compaction_artifact" | "full_context";
+  reasoningEffort?: ThinkingLevel;
+  inputItems?: number;
+  usage?: Usage;
 };
 
 function normalizeBaseUrl(baseUrl: string | undefined, fallback: string): string {
@@ -171,6 +187,7 @@ export function buildCodexIdentityHeaders(sessionId?: string): Record<string, st
   }
   return {
     "x-codex-installation-id": resolveCodexInstallationId(),
+    "x-client-request-id": sessionId,
     "x-codex-window-id": `${sessionId}:0`,
     session_id: sessionId,
   };
@@ -394,11 +411,15 @@ function isResponseItem(value: unknown): value is ResponseItem {
   return isRecord(value) && typeof value.type === "string";
 }
 
-function buildPortableSummaryPrompt(conversation: string, customInstructions?: string): string {
+function buildPortableSummaryInstruction(customInstructions?: string): string {
   const instructionSuffix = customInstructions
     ? `\n\nAdditional summarization instructions:\n${customInstructions}`
     : "";
-  return `Summarize this conversation for future continuation in pi. Preserve goals, decisions, important facts, file paths, open questions, and next steps. Be concise but include information needed to continue work.${instructionSuffix}\n\n<conversation>\n${conversation}\n</conversation>`;
+  return `Create a portable continuation summary for future use in pi. Preserve goals, decisions, important facts, file paths, completed work, open questions, risks, and concrete next steps. Be concise but include everything needed to continue. Do not mention that the context was encrypted or compacted. Output only the summary in concise Markdown.${instructionSuffix}`;
+}
+
+function buildPortableSummaryPrompt(conversation: string, customInstructions?: string): string {
+  return `${buildPortableSummaryInstruction(customInstructions)}\n\n<conversation>\n${conversation}\n</conversation>`;
 }
 
 export function messageToResponseItems(message: AgentMessage): ResponseItem[] {
@@ -627,6 +648,27 @@ export function normalizeResponseItemsForPrompt(
   return stripImagesWhenUnsupported(withoutOrphanOutputs, model);
 }
 
+export function selectRemoteCompactionInput(params: {
+  snapshotInput?: unknown[];
+  snapshotSuffix?: ResponseItem[];
+  fallbackInput: ResponseItem[];
+  model: { input?: readonly unknown[] };
+}): { input: unknown[]; source: "wire_snapshot" | "reconstructed" } {
+  if (params.snapshotInput) {
+    return {
+      input: [
+        ...structuredClone(params.snapshotInput),
+        ...normalizeResponseItemsForPrompt(params.snapshotSuffix ?? [], params.model),
+      ],
+      source: "wire_snapshot",
+    };
+  }
+  return {
+    input: normalizeResponseItemsForPrompt(params.fallbackInput, params.model),
+    source: "reconstructed",
+  };
+}
+
 function isRealUserMessage(item: ResponseItem): boolean {
   if (item.type !== "message" || item.role !== "user") return false;
   if (typeof item.content === "string") return item.content.trim().length > 0;
@@ -690,16 +732,33 @@ function truncateRetainedMessages(items: ResponseItem[], maxTokens: number): Res
   return retainedReversed.reverse();
 }
 
+function retainedUserMessage(item: unknown): ResponseItem | undefined {
+  if (!isRecord(item) || item.role !== "user") return undefined;
+  const content = item.content;
+  if (typeof content === "string") {
+    return content.trim()
+      ? { type: "message", role: "user", content: [{ type: "input_text", text: content }] }
+      : undefined;
+  }
+  if (!Array.isArray(content) || content.length === 0) return undefined;
+  return {
+    type: "message",
+    role: "user",
+    content: structuredClone(content) as ResponseContentItem[],
+  };
+}
+
 export function buildRemoteCompactionV2History(
-  input: ResponseItem[],
+  input: unknown[],
   compactionItem: ResponseItem,
 ): ResponseItem[] {
   if (compactionItem.type !== "compaction") {
     throw new Error("OpenAI remote compaction v2 did not return a compaction item.");
   }
-  const retainedUserMessages = input.filter(
-    (item) => item.type === "message" && item.role === "user" && isRealUserMessage(item),
-  );
+  const retainedUserMessages = input.flatMap((item) => {
+    const retained = retainedUserMessage(item);
+    return retained ? [retained] : [];
+  });
   return [
     ...truncateRetainedMessages(retainedUserMessages, RETAINED_MESSAGE_TOKEN_BUDGET),
     cloneResponseItem(compactionItem),
@@ -730,9 +789,10 @@ export async function generatePortableSummary(params: {
   headers?: ProviderHeadersLike;
   customInstructions?: string;
   signal?: AbortSignal;
+  thinkingLevel?: ThinkingLevel;
   firstKeptEntryId: string;
   tokensBefore: number;
-}): Promise<CompactionResult> {
+}): Promise<CompactionResult<PortableSummaryDetails>> {
   const conversation = serializeConversation(convertToLlm(params.messages));
   const response = await complete(
     params.model,
@@ -752,6 +812,9 @@ export async function generatePortableSummary(params: {
       headers: params.headers as PiAiStreamHeaders,
       maxTokens: 4096,
       signal: params.signal,
+      ...(params.thinkingLevel && params.thinkingLevel !== "off"
+        ? { reasoningEffort: params.thinkingLevel }
+        : {}),
     },
   );
 
@@ -765,6 +828,102 @@ export async function generatePortableSummary(params: {
     summary: summary || buildCompactionSummaryText(params.model),
     firstKeptEntryId: params.firstKeptEntryId,
     tokensBefore: params.tokensBefore,
+    details: {
+      source: "full_context",
+      ...(params.thinkingLevel ? { reasoningEffort: params.thinkingLevel } : {}),
+      usage: response.usage,
+    },
+  };
+}
+
+export async function generateArtifactPortableSummary(params: {
+  replacementHistory: ResponseItem[];
+  model: Model<any>;
+  apiKey: string;
+  headers?: ProviderHeadersLike;
+  sessionId?: string;
+  promptCacheKey?: string;
+  instructions?: string;
+  tools?: Record<string, unknown>[];
+  parallelToolCalls?: boolean;
+  toolChoice?: unknown;
+  text?: ResponsesTextConfig;
+  reasoning?: RemoteCompactionReasoningConfig;
+  customInstructions?: string;
+  signal?: AbortSignal;
+  thinkingLevel?: ThinkingLevel;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+}): Promise<CompactionResult<PortableSummaryDetails>> {
+  const instruction = buildPortableSummaryInstruction(params.customInstructions);
+  const summaryInput: ResponseItem[] = [
+    ...structuredClone(params.replacementHistory),
+    {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: instruction }],
+    },
+  ];
+  const response = await complete(
+    params.model,
+    {
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: instruction }],
+        timestamp: Date.now(),
+      }],
+    },
+    {
+      apiKey: params.apiKey,
+      headers: params.headers as PiAiStreamHeaders,
+      maxTokens: 4096,
+      signal: params.signal,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      ...(params.thinkingLevel && params.thinkingLevel !== "off"
+        ? { reasoningEffort: params.thinkingLevel, reasoningSummary: "auto" }
+        : {}),
+      onPayload: (payload: unknown) => {
+        if (!isRecord(payload)) return payload;
+        return {
+          ...payload,
+          input: summaryInput,
+          ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
+          ...(params.tools !== undefined ? { tools: structuredClone(params.tools) } : {}),
+          ...(params.parallelToolCalls !== undefined
+            ? { parallel_tool_calls: params.parallelToolCalls }
+            : {}),
+          ...(params.toolChoice !== undefined ? { tool_choice: structuredClone(params.toolChoice) } : {}),
+          ...(params.text !== undefined ? { text: structuredClone(params.text) } : {}),
+          ...(params.reasoning !== undefined
+            ? { reasoning: structuredClone(params.reasoning) }
+            : {}),
+          ...((params.promptCacheKey ?? params.sessionId)
+            ? { prompt_cache_key: params.promptCacheKey ?? params.sessionId }
+            : {}),
+        };
+      },
+    },
+  );
+
+  const summary = response.content
+    .filter((item): item is { type: "text"; text: string } => item.type === "text")
+    .map((item) => item.text)
+    .join("\n")
+    .trim();
+  if (!summary) {
+    throw new Error("Artifact-based portable summary returned no text.");
+  }
+
+  return {
+    summary,
+    firstKeptEntryId: params.firstKeptEntryId,
+    tokensBefore: params.tokensBefore,
+    details: {
+      source: "remote_compaction_artifact",
+      ...(params.thinkingLevel ? { reasoningEffort: params.thinkingLevel } : {}),
+      inputItems: summaryInput.length,
+      usage: response.usage,
+    },
   };
 }
 
@@ -874,27 +1033,50 @@ function parseRemoteCompactionUsageSnapshot(value: unknown): RemoteCompactionUsa
   };
 }
 
+function extractRemoteCompactionReasoning(value: unknown): RemoteCompactionReasoningConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  const effort = value.effort;
+  const summary = value.summary;
+  const normalized: RemoteCompactionReasoningConfig = {
+    ...(
+      typeof effort === "string" && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)
+        ? { effort: effort as RemoteCompactionReasoningConfig["effort"] }
+        : {}
+    ),
+    ...(
+      summary === null || (typeof summary === "string" && ["auto", "concise", "detailed"].includes(summary))
+        ? { summary: summary as ResponsesReasoningConfig["summary"] }
+        : {}
+    ),
+  };
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 export function buildRemoteCompactionRequestBody(params: {
   model: Model<any>;
-  input: ResponseItem[];
+  input: unknown[];
   instructions?: string;
-  tools: Record<string, unknown>[];
-  parallelToolCalls: boolean;
-  reasoning?: ResponsesReasoningConfig;
+  tools?: Record<string, unknown>[];
+  parallelToolCalls?: boolean;
+  promptCacheKey?: string;
+  toolChoice?: unknown;
+  reasoning?: RemoteCompactionReasoningConfig;
   text?: ResponsesTextConfig;
   sessionId?: string;
 }): Record<string, unknown> {
   return {
     model: params.model.id,
     input: [...params.input, { type: "compaction_trigger" }],
-    instructions: params.instructions,
-    tools: params.tools,
-    parallel_tool_calls: params.parallelToolCalls,
-    tool_choice: "auto",
+    ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
+    ...(params.tools !== undefined ? { tools: params.tools } : {}),
+    ...(params.parallelToolCalls !== undefined ? { parallel_tool_calls: params.parallelToolCalls } : {}),
+    ...(params.toolChoice !== undefined ? { tool_choice: params.toolChoice } : {}),
     stream: true,
     store: false,
     include: ["reasoning.encrypted_content"],
-    ...(params.sessionId ? { prompt_cache_key: params.sessionId } : {}),
+    ...((params.promptCacheKey ?? params.sessionId)
+      ? { prompt_cache_key: params.promptCacheKey ?? params.sessionId }
+      : {}),
     ...(params.reasoning ? { reasoning: params.reasoning } : {}),
     ...(params.text ? { text: params.text } : {}),
   };
@@ -969,11 +1151,13 @@ export async function callRemoteCompactionEndpoint(params: {
   apiKey: string;
   headers?: ProviderHeadersLike;
   sessionId?: string;
-  input: ResponseItem[];
+  input: unknown[];
   instructions?: string;
-  tools: Record<string, unknown>[];
-  parallelToolCalls: boolean;
-  reasoning?: ResponsesReasoningConfig;
+  tools?: Record<string, unknown>[];
+  parallelToolCalls?: boolean;
+  promptCacheKey?: string;
+  toolChoice?: unknown;
+  reasoning?: RemoteCompactionReasoningConfig;
   text?: ResponsesTextConfig;
   signal?: AbortSignal;
 }): Promise<RemoteCompactionResult> {
@@ -995,6 +1179,8 @@ export async function callRemoteCompactionEndpoint(params: {
       instructions: params.instructions,
       tools: params.tools,
       parallelToolCalls: params.parallelToolCalls,
+      promptCacheKey: params.promptCacheKey,
+      toolChoice: params.toolChoice,
       reasoning: params.reasoning,
       text: params.text,
       sessionId: params.sessionId,
@@ -1019,6 +1205,7 @@ export function buildRemoteCompactionDetails(
   model: Model<any>,
   replacementHistory: ResponseItem[],
   usage?: RemoteCompactionUsageSnapshot,
+  request?: RemoteCompactionDetails["request"],
 ): RemoteCompactionDetails {
   return {
     version: 2,
@@ -1027,6 +1214,7 @@ export function buildRemoteCompactionDetails(
     modelKey: modelKey(model),
     replacementHistory,
     ...(usage ? { usage } : {}),
+    ...(request ? { request } : {}),
   };
 }
 
@@ -1046,6 +1234,21 @@ export function extractRemoteCompactionDetails(details: unknown):
   if (replacementHistory.length === 0) return undefined;
 
   const usage = parseRemoteCompactionUsageSnapshot(remote.usage);
+  const requestValue = isRecord(remote.request) ? remote.request : undefined;
+  const requestReasoning = extractRemoteCompactionReasoning(requestValue?.reasoning);
+  const requestInputItems = requestValue?.inputItems;
+  const requestInputSource = requestValue?.inputSource;
+  const inputSource: NonNullable<RemoteCompactionDetails["request"]>["inputSource"] =
+    requestInputSource === "wire_snapshot" || requestInputSource === "reconstructed"
+      ? requestInputSource
+      : undefined;
+  const request = typeof requestInputItems === "number" && Number.isInteger(requestInputItems) && requestInputItems >= 0
+    ? {
+        ...(requestReasoning ? { reasoning: requestReasoning } : {}),
+        inputItems: requestInputItems,
+        ...(inputSource ? { inputSource } : {}),
+      }
+    : undefined;
 
   return {
     version: isV2 ? 2 : 1,
@@ -1054,6 +1257,7 @@ export function extractRemoteCompactionDetails(details: unknown):
     modelKey: typeof remote.modelKey === "string" ? remote.modelKey : "",
     replacementHistory,
     ...(usage ? { usage } : {}),
+    ...(request ? { request } : {}),
   };
 }
 

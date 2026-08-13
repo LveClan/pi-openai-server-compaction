@@ -5,7 +5,11 @@
  * and model-key logic out of the higher-level extension wiring.
  */
 import type { ExtensionConfig, JsonRecord } from "./config.ts";
-import type { ResponsesReasoningConfig, ResponsesTextConfig } from "./remote-compaction.ts";
+import type {
+  RemoteCompactionReasoningConfig,
+  ResponsesReasoningConfig,
+  ResponsesTextConfig,
+} from "./remote-compaction.ts";
 import { isRecord, toPositiveInteger } from "./config.ts";
 
 export type ModelLike = {
@@ -16,6 +20,7 @@ export type ModelLike = {
   compat?: unknown;
   contextWindow?: unknown;
   reasoning?: unknown;
+  thinkingLevelMap?: unknown;
   input?: readonly unknown[];
 };
 
@@ -25,6 +30,18 @@ type AssistantMessageLike = {
   model?: unknown;
   responseId?: unknown;
   stopReason?: unknown;
+};
+
+export type ResponsesRequestSnapshot = {
+  modelKey: string;
+  input?: unknown[];
+  instructions?: string;
+  tools?: JsonRecord[];
+  parallelToolCalls?: boolean;
+  promptCacheKey?: string;
+  toolChoice?: unknown;
+  reasoning?: RemoteCompactionReasoningConfig;
+  text?: ResponsesTextConfig;
 };
 
 export function hostnameFromBaseUrl(baseUrl: unknown): string | undefined {
@@ -173,6 +190,36 @@ export function thinkingLevelToResponsesReasoning(
   return undefined;
 }
 
+export function resolveCompactionReasoning(params: {
+  model: ModelLike;
+  thinkingLevel: unknown;
+  branchThinkingLevel?: unknown;
+  observed?: RemoteCompactionReasoningConfig;
+}): RemoteCompactionReasoningConfig | undefined {
+  if (!params.model.reasoning) return undefined;
+
+  const thinkingLevel = params.thinkingLevel ?? params.branchThinkingLevel;
+  if (typeof thinkingLevel !== "string") return undefined;
+
+  const effortMap = isRecord(params.model.thinkingLevelMap) ? params.model.thinkingLevelMap : undefined;
+  const mappedEffort = effortMap?.[thinkingLevel];
+  if (mappedEffort === null) return undefined;
+
+  const effort = typeof mappedEffort === "string"
+    ? mappedEffort
+    : thinkingLevel === "off"
+      ? undefined
+      : thinkingLevel;
+  if (!effort || !["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(effort)) {
+    return undefined;
+  }
+
+  return {
+    effort: effort as RemoteCompactionReasoningConfig["effort"],
+    summary: params.observed?.summary ?? "auto",
+  };
+}
+
 export function applyRemoteHistoryPayloadPatch(params: {
   payload: JsonRecord;
   explicitHistory: unknown[];
@@ -186,12 +233,12 @@ export function applyRemoteHistoryPayloadPatch(params: {
   return nextPayload;
 }
 
-export function extractResponsesReasoningConfig(payload: unknown): ResponsesReasoningConfig | undefined {
+export function extractResponsesReasoningConfig(payload: unknown): RemoteCompactionReasoningConfig | undefined {
   if (!isRecord(payload) || !isRecord(payload.reasoning)) return undefined;
   const effort = payload.reasoning.effort;
   const summary = payload.reasoning.summary;
-  const normalized: ResponsesReasoningConfig = {
-    ...(typeof effort === "string" ? { effort: effort as ResponsesReasoningConfig["effort"] } : {}),
+  const normalized: RemoteCompactionReasoningConfig = {
+    ...(typeof effort === "string" ? { effort: effort as RemoteCompactionReasoningConfig["effort"] } : {}),
     ...(
       summary === null || typeof summary === "string"
         ? { summary: summary as ResponsesReasoningConfig["summary"] }
@@ -202,7 +249,39 @@ export function extractResponsesReasoningConfig(payload: unknown): ResponsesReas
 }
 
 export function extractResponsesTextConfig(payload: unknown): ResponsesTextConfig | undefined {
-  return isRecord(payload) && isRecord(payload.text) ? payload.text : undefined;
+  return isRecord(payload) && isRecord(payload.text) ? structuredClone(payload.text) : undefined;
+}
+
+export function extractResponsesRequestSnapshot(
+  payload: unknown,
+  model: ModelLike,
+): ResponsesRequestSnapshot | undefined {
+  if (!isRecord(payload)) return undefined;
+
+  const input = Array.isArray(payload.input) ? structuredClone(payload.input) : undefined;
+  const tools = Array.isArray(payload.tools)
+    ? payload.tools.filter(isRecord).map((tool) => structuredClone(tool))
+    : undefined;
+  const parallelToolCalls = typeof payload.parallel_tool_calls === "boolean"
+    ? payload.parallel_tool_calls
+    : undefined;
+  const promptCacheKey = typeof payload.prompt_cache_key === "string"
+    ? payload.prompt_cache_key
+    : undefined;
+  const reasoning = extractResponsesReasoningConfig(payload);
+  const text = extractResponsesTextConfig(payload);
+
+  return {
+    modelKey: modelKey(model),
+    ...(input ? { input } : {}),
+    ...(typeof payload.instructions === "string" ? { instructions: payload.instructions } : {}),
+    ...(tools ? { tools } : {}),
+    ...(parallelToolCalls !== undefined ? { parallelToolCalls } : {}),
+    ...(promptCacheKey ? { promptCacheKey } : {}),
+    ...(payload.tool_choice !== undefined ? { toolChoice: structuredClone(payload.tool_choice) } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(text ? { text } : {}),
+  };
 }
 
 export function extractAssistantResponseId(message: unknown): string | undefined {
