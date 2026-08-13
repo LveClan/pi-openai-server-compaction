@@ -100,7 +100,9 @@ const {
   buildRemoteCompactionDetails,
   buildRemoteCompactionRequestBody,
   buildRemoteCompactionV2History,
+  callRemoteCompactionEndpoint,
   extractRemoteCompactionDetails,
+  generatePortableSummary,
   normalizeResponseItemsForPrompt,
   parseRemoteCompactionV2Events,
   processCompactedHistory,
@@ -110,6 +112,73 @@ const {
 const {
   selectInputItemsForContinuation,
 } = await import(pathToFileURL(join(repoRoot, "src", "openai-ws-stream.ts")).href);
+const {
+  createAssistantMessageEventStream,
+  registerApiProvider,
+  unregisterApiProviders,
+} = await import("@earendil-works/pi-ai/compat");
+
+const streamProviderSource = "pi-openai-server-compaction-null-header-smoke";
+const streamHeaders = {
+  "x-forwarded-header": "preserved",
+  authorization: null,
+};
+let forwardedStreamHeaders;
+const mockSummaryStream = (model, _context, options) => {
+  forwardedStreamHeaders = options?.headers;
+  const stream = createAssistantMessageEventStream();
+  stream.end({
+    role: "assistant",
+    content: [{ type: "text", text: "stream summary" }],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  });
+  return stream;
+};
+registerApiProvider({
+  api: "null-header-smoke",
+  stream: mockSummaryStream,
+  streamSimple: mockSummaryStream,
+}, streamProviderSource);
+try {
+  const portableSummary = await generatePortableSummary({
+    messages: [{
+      role: "user",
+      content: [{ type: "text", text: "summarize this" }],
+      timestamp: Date.now(),
+    }],
+    model: {
+      provider: "null-header-smoke",
+      api: "null-header-smoke",
+      id: "null-header-smoke",
+    },
+    apiKey: "stream-test-key",
+    headers: streamHeaders,
+    firstKeptEntryId: "entry-1",
+    tokensBefore: 1,
+  });
+  assert.equal(portableSummary.summary, "stream summary");
+  assert.deepStrictEqual(
+    forwardedStreamHeaders,
+    streamHeaders,
+    "pi-ai stream boundary should receive the ProviderHeaders unchanged",
+  );
+  assert.equal(forwardedStreamHeaders.authorization, null);
+  assert.equal(forwardedStreamHeaders["x-forwarded-header"], "preserved");
+} finally {
+  unregisterApiProviders(streamProviderSource);
+}
 
 const targetModelKey = "openai:openai-responses:gpt-5.4-nano";
 const reconstructed = reconstructRemoteCompactionStateFromBranch({
@@ -311,6 +380,158 @@ assert.match(compactionHeaders["x-codex-installation-id"], /^[0-9a-f-]{36}$/);
 assert.equal(compactionHeaders["x-extra"], "yes");
 assert.equal(compactionHeaders["x-codex-beta-features"], "remote_compaction_v2");
 assert.equal(compactionHeaders.accept, "text/event-stream");
+
+const accountPayload = Buffer.from(JSON.stringify({
+  "https://api.openai.com/auth": { chatgpt_account_id: "account-123" },
+})).toString("base64url");
+const codexHeaders = buildRemoteCompactionHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  headers: { "x-extra": "yes" },
+  sessionId: "session-123",
+});
+assert.equal(codexHeaders.authorization, `Bearer header.${accountPayload}.signature`);
+assert.equal(codexHeaders["chatgpt-account-id"], "account-123");
+assert.equal(codexHeaders["x-extra"], "yes");
+
+const codexOpaqueKeyHeaders = buildRemoteCompactionHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: "placeholder-credential-must-stay-deleted",
+  headers: {
+    Authorization: null,
+    "Chatgpt-Account-Id": null,
+  },
+  sessionId: "session-123",
+});
+assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "chatgpt-account-id"), []);
+assert.deepEqual(headerValues(Object.entries(codexOpaqueKeyHeaders), "authorization"), []);
+assert.equal(codexOpaqueKeyHeaders.originator, "pi");
+
+async function captureDirectRequestHeaders(params) {
+  let captured;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    captured = init?.headers;
+    return new Response([
+      'data: {"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"NULL_HEADER_TEST"}}',
+      'data: {"type":"response.completed","response":{}}',
+      "",
+    ].join("\n\n"), {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+  try {
+    await callRemoteCompactionEndpoint({
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }],
+      tools: [],
+      parallelToolCalls: true,
+      ...params,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.ok(captured && typeof captured === "object");
+  return Object.entries(captured);
+}
+
+function headerValues(entries, name) {
+  return entries.filter(([key]) => key.toLowerCase() === name.toLowerCase()).map(([, value]) => value);
+}
+
+const directHttpHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai",
+    api: "openai-responses",
+    id: "gpt-5.4-nano",
+  },
+  apiKey: "placeholder-credential-must-stay-deleted",
+  headers: {
+    Authorization: null,
+    "x-delete-marker": null,
+    "x-concrete-header": "preserved",
+  },
+});
+assert.ok(directHttpHeaderEntries.every(([, value]) => typeof value === "string"));
+assert.deepEqual(headerValues(directHttpHeaderEntries, "authorization"), []);
+assert.deepEqual(headerValues(directHttpHeaderEntries, "x-delete-marker"), []);
+assert.equal(directHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
+assert.deepEqual(headerValues(directHttpHeaderEntries, "x-concrete-header"), ["preserved"]);
+
+const codexHttpHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: {
+    Authorization: null,
+    "OpenAI-Beta": null,
+    "User-Agent": null,
+    "Chatgpt-Account-Id": null,
+    Originator: "other",
+  },
+});
+assert.ok(codexHttpHeaderEntries.every(([, value]) => typeof value === "string"));
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "authorization"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "openai-beta"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "user-agent"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "chatgpt-account-id"), []);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "originator"), ["pi"]);
+assert.equal(codexHttpHeaderEntries.some(([, value]) => value === "null" || value === ""), false);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "session_id"), ["session-123"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "accept"), ["text/event-stream"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "content-type"), ["application/json"]);
+assert.deepEqual(headerValues(codexHttpHeaderEntries, "x-codex-beta-features"), ["remote_compaction_v2"]);
+
+const codexDefaultHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: { "x-extra": "yes" },
+});
+assert.deepEqual(
+  headerValues(codexDefaultHeaderEntries, "authorization"),
+  [`Bearer header.${accountPayload}.signature`],
+);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "originator"), ["pi"]);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "openai-beta"), ["responses=experimental"]);
+assert.deepEqual(headerValues(codexDefaultHeaderEntries, "x-extra"), ["yes"]);
+
+const codexOverrideHeaderEntries = await captureDirectRequestHeaders({
+  model: {
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    id: "gpt-5.6-sol",
+  },
+  apiKey: `header.${accountPayload}.signature`,
+  sessionId: "session-123",
+  headers: {
+    Authorization: "Bearer provider-token",
+    Originator: "codex_cli_rs",
+    "OpenAI-BETA": "responses=other",
+    "User-Agent": "other-agent",
+  },
+});
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "originator"), ["pi"]);
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "openai-beta"), ["responses=experimental"]);
+assert.deepEqual(headerValues(codexOverrideHeaderEntries, "authorization"), ["Bearer provider-token"]);
+assert.equal(headerValues(codexOverrideHeaderEntries, "user-agent").length, 1);
+assert.match(headerValues(codexOverrideHeaderEntries, "user-agent")[0], /^pi-openai-server-compaction \(/);
 
 const websocketHeaders = buildCodexWebSocketHeaders("session-123");
 assert.equal(websocketHeaders["x-client-request-id"], "session-123");
